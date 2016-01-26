@@ -9,6 +9,7 @@ pkg="stax"
 version="0.10"
 script_path=$(cd $(dirname $0); pwd -P)
 system=$(uname)
+AWS_OPTIONS=""
 STAX_DIR="$script_path/run"
 STAX_NAME_FILE="$STAX_DIR/stax-name"
 stax_log="$STAX_DIR/stax.log"
@@ -55,6 +56,10 @@ stax-message(){
         shift
     fi
     echo "${yellow}[ $cyan$pref$yellow ]$reset  $msg"
+}
+
+stax-aws() {
+    aws $AWS_OPTIONS "$@"
 }
 
 stax-error(){
@@ -171,8 +176,12 @@ stax-preflight(){
     fi
     tag_prefix=${STAX_TAG_PREFIX:-"stax"}
     s3_sse=${STAX_AWS_S3_SSE:-"AES256"}
+    aws_profile=${STAX_AWS_PROFILE:-""}
     if [ "$STAX_AWS_S3_SSE" != "AES256" -a "$STAX_AWS_S3_SSE" != "aws:kms" ]; then
         stax-error-exit "invalid encryption specified for S3. Must be 'AES256' or 'aws:kms'."
+    fi
+    if [ -n "$aws_profile" ]; then
+        AWS_OPTIONS="$AWS_OPTIONS --profile $aws_profile"
     fi
 }
 
@@ -183,7 +192,7 @@ stax-create-key(){
     touch "$STAX_PRIV_KEY"
     chmod 600 "$STAX_PRIV_KEY"
     stax-message "  creating key pair"
-    if ! aws ec2 create-key-pair --key-name "$STAX_NAME" --query 'KeyMaterial' --output text > "$STAX_PRIV_KEY"; then
+    if ! stax-aws ec2 create-key-pair --key-name "$STAX_NAME" --query 'KeyMaterial' --output text > "$STAX_PRIV_KEY"; then
         stax-error "failed to create key pair in aws"
         return 1
     fi
@@ -208,7 +217,7 @@ stax-create-bucket(){
         stax-error-exit "you must supply the name for the bucket to be created" 5
     fi
     stax-message "  creating bucket $bucket"
-    if ! aws s3 mb "s3://$bucket" > /dev/null; then
+    if ! stax-aws s3 mb "s3://$bucket" > /dev/null; then
         stax-error "failed to create bucket: $bucket"
         return 1
     fi
@@ -231,7 +240,7 @@ stax-upload-template(){
     fi
     template_s3="$STAX_NAME/$target_base.json"
     stax-message "  uploading template"
-    if ! aws s3 cp --sse $s3_sse "$template_path" "s3://$template_s3" > /dev/null; then
+    if ! stax-aws s3 cp --sse $s3_sse "$template_path" "s3://$template_s3" > /dev/null; then
         stax-error "failed to copy $template_path to s3"
         return 1
     fi
@@ -248,7 +257,7 @@ stax-validate-template(){
     fi
     template_url="$STAX_TEMPLATE_URL"
     stax-message "  validating template $template_url"
-    if ! aws cloudformation validate-template --template-url "$template_url" > /dev/null; then
+    if ! stax-aws cloudformation validate-template --template-url "$template_url" > /dev/null; then
         stax-error "template failed to validate, exiting"
         return 1
     fi
@@ -322,18 +331,18 @@ stax-add(){
     fi
     if ! stax-validate-template; then
         stax-error "template did not validate: $template_path"
-        aws s3 rm "s3://$STAX_NAME/$STAX_NAME_ADD.json" > /dev/null
+        stax-aws s3 rm "s3://$STAX_NAME/$STAX_NAME_ADD.json" > /dev/null
         rm -f $STAX_ADD_PARAMS
         return 1
     fi
     stax-message "  adding $template_path to stax"
-    if ! aws cloudformation create-stack \
+    if ! stax-aws cloudformation create-stack \
         --stack-name "$STAX_NAME_ADD" \
         --template-url "$STAX_TEMPLATE_URL" \
         --parameters "$(<$STAX_ADD_PARAMS)" > /dev/null
     then
         stax-error "creation of $template_path failed"
-        aws s3 rm "s3://$STAX_NAME/$STAX_NAME_ADD.json" > /dev/null
+        stax-aws s3 rm "s3://$STAX_NAME/$STAX_NAME_ADD.json" > /dev/null
         rm -f $STAX_ADD_PARAMS
         return 1
     fi
@@ -391,7 +400,7 @@ stax-remove(){
         stax-error "unknown addition: $addition"
         return 1
     fi
-    if ! aws cloudformation delete-stack --stack-name "$addition" > /dev/null; then
+    if ! stax-aws cloudformation delete-stack --stack-name "$addition" > /dev/null; then
         stax-error "removal failed: $addition"
         return 1
     fi
@@ -492,7 +501,7 @@ stax-update(){
     fi
     stax-message "  uploading updated vpc assets"
     for f in assets/vpc/*; do
-        if ! aws s3 cp --sse $s3_sse "$f" "s3://$STAX_NAME/" > /dev/null; then
+        if ! stax-aws s3 cp --sse $s3_sse "$f" "s3://$STAX_NAME/" > /dev/null; then
             stax-error "failed to upload file $f to bucket $STAX_NAME"
             stax-delete-bucket
             stax-delete-key
@@ -503,7 +512,7 @@ stax-update(){
     stax-message "  updated vpc assets uploaded"
     stax-message "  updating stax in aws"
     #if ! aws cloudformation create-stack \
-    if ! aws cloudformation update-stack \
+    if ! stax-aws cloudformation update-stack \
         --stack-name "$STAX_NAME" \
         --template-url "$STAX_TEMPLATE_URL" \
         --parameters "$(<$STAX_PARAMS)" \
@@ -573,7 +582,7 @@ stax-create(){
     fi
     stax-message "  uploading vpc assets"
     for f in assets/vpc/*; do
-        if ! aws s3 cp --sse $s3_sse "$f" "s3://$STAX_NAME/" > /dev/null; then
+        if ! stax-aws s3 cp --sse $s3_sse "$f" "s3://$STAX_NAME/" > /dev/null; then
             stax-error "failed to upload file $f to bucket $STAX_NAME"
             stax-delete-bucket
             stax-delete-key
@@ -603,7 +612,7 @@ stax-create(){
     tags="$tags]"
     stax-message "  using tags: $tags"
     stax-message "  creating stax in aws"
-    if ! aws cloudformation create-stack \
+    if ! stax-aws cloudformation create-stack \
         --stack-name "$STAX_NAME" \
         --template-url "$STAX_TEMPLATE_URL" \
         --parameters "$(<$STAX_PARAMS)" \
@@ -736,7 +745,7 @@ stax-describe(){
     stax-message "$STAX_NAME" "NAME"
     stax-message "  querying aws"
     STAX_DESC="$STAX_DIR/$STAX_NAME.json"
-    if ! aws --output json cloudformation describe-stacks --stack-name "$STAX_NAME" > "$STAX_DESC"; then
+    if ! stax-aws --output json cloudformation describe-stacks --stack-name "$STAX_NAME" > "$STAX_DESC"; then
         stax-error-message "failed to get stax information for $STAX_NAME from aws"
         return 1
     fi
@@ -860,13 +869,13 @@ stax-complete(){
 }
 
 stax-running-instances(){
-    aws --output json ec2 describe-instances --filter Name="instance-state-code",Values="16" | grep "\"Instances\"\:" | wc -l | sed 's/ //g'
+    stax-aws --output json ec2 describe-instances --filter Name="instance-state-code",Values="16" | grep "\"Instances\"\:" | wc -l | sed 's/ //g'
 }
 
 stax-list(){
     stax-message "list currently running stax"
     stax-message "  querying aws for currently running stax"
-    running_stax=$(aws --output json cloudformation list-stacks --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE | $jq --raw-output '.StackSummaries[].StackName' | grep "^$prefix-$pkg-")
+    running_stax=$(stax-aws --output json cloudformation list-stacks --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE | $jq --raw-output '.StackSummaries[].StackName' | grep "^$prefix-$pkg-")
     if [[ $? != 0 || ! $running_stax ]]; then
         #stax-error "  aws query failed"
         stax-error "  aws query failed or produced a blank set"
@@ -1019,14 +1028,14 @@ stax-sleep(){
     fi
     stax-message "    instance IP = $BASTION_IP"
 
-    BASTION_ID=`aws ec2 describe-addresses | $jq --raw-output '.Addresses[] | select(.PublicIp=="'$BASTION_IP'").InstanceId'`
+    BASTION_ID=`stax-aws ec2 describe-addresses | $jq --raw-output '.Addresses[] | select(.PublicIp=="'$BASTION_IP'").InstanceId'`
     if [[ ! $BASTION_ID ]]; then
         stax-error "unable to determine instance ID of bastion host"
         return 1
     fi
     stax-message "    instance ID = $BASTION_ID"
 
-    BASTION_STATUS=`aws ec2 describe-instances --instance-id $BASTION_ID | $jq --raw-output '.Reservations[].Instances[].State.Name'`
+    BASTION_STATUS=`stax-aws ec2 describe-instances --instance-id $BASTION_ID | $jq --raw-output '.Reservations[].Instances[].State.Name'`
     if [[ ! $BASTION_STATUS ]]; then
         stax-error "unable to determine status of bastion host"
         return 1
@@ -1044,12 +1053,12 @@ stax-sleep(){
         stax-error "unsupported instance state: $BASTION_STATUS"
         return 1
     fi
-    if ! aws ec2 $ec2_cmd --instance-id $BASTION_ID > /dev/null; then
+    if ! stax-aws ec2 $ec2_cmd --instance-id $BASTION_ID > /dev/null; then
         stax-error "bastion toggle failed, exiting"
         return 1
     fi
     stax-message "  waiting 15 seconds for state change" "zzzz"; sleep 15
-    BASTION_STATUS=`aws ec2 describe-instances --instance-id $BASTION_ID|$jq --raw-output '.Reservations[].Instances[].State.Name'`
+    BASTION_STATUS=`stax-aws ec2 describe-instances --instance-id $BASTION_ID|$jq --raw-output '.Reservations[].Instances[].State.Name'`
     stax-message "  bastion status: $BASTION_STATUS"
 }
 
@@ -1074,7 +1083,7 @@ stax-getdockerips(){
     stax-message "get gateway and service IPs"
     stax-message "  querying aws for gateway hosts"
     gateway_hosts="$STAX_DIR/$STAX_NAME.gateway_hosts"
-    if ! aws --output json ec2 describe-instances | $jq --raw-output ".Reservations[].Instances[] | select(.Tags[].Value==\"gateway-$STAX_NAME\").PrivateIpAddress" > "$gateway_hosts" 2>/dev/null; then
+    if ! stax-aws --output json ec2 describe-instances | $jq --raw-output ".Reservations[].Instances[] | select(.Tags[].Value==\"gateway-$STAX_NAME\").PrivateIpAddress" > "$gateway_hosts" 2>/dev/null; then
         stax-error "failed to query aws for gateway instances"
         return 1
     fi
@@ -1087,13 +1096,13 @@ stax-getdockerips(){
         fi
     done
     stax-message "  querying aws for service hosts"
-    if ! aws --output json ec2 describe-instances | $jq --raw-output ".Reservations[].Instances[] | select(.Tags[].Value==\"service-$STAX_NAME\").PrivateIpAddress" >> "$service_hosts" 2>/dev/null; then
+    if ! stax-aws --output json ec2 describe-instances | $jq --raw-output ".Reservations[].Instances[] | select(.Tags[].Value==\"service-$STAX_NAME\").PrivateIpAddress" >> "$service_hosts" 2>/dev/null; then
         stax-error "failed to query aws for service instances"
         return 1
     fi
     elk_host="$STAX_DIR/$STAX_NAME.elk_host"
     stax-message "  getting elk host"
-    if ! aws --output json ec2 describe-instances | $jq --raw-output ".Reservations[].Instances[] | select(.Tags[].Value==\"elk-$STAX_NAME\").PrivateIpAddress" > "$elk_host" 2>/dev/null; then
+    if ! stax-aws --output json ec2 describe-instances | $jq --raw-output ".Reservations[].Instances[] | select(.Tags[].Value==\"elk-$STAX_NAME\").PrivateIpAddress" > "$elk_host" 2>/dev/null; then
         stax-error "failed to get IP for elk host"
         return 1
     fi
@@ -1127,13 +1136,13 @@ stax-connect(){
 stax-delete-key(){
     stax-message "deleting key pair"
     stax-message "  making sure key $STAX_NAME exists in aws"
-    if ! aws ec2 describe-key-pairs --key-names "$STAX_NAME" > /dev/null 2>&1; then
+    if ! stax-aws ec2 describe-key-pairs --key-names "$STAX_NAME" > /dev/null 2>&1; then
         stax-message "  key $STAX_NAME does not exist in aws"
         return 0
     fi
     stax-message "  deleting $STAX_NAME key from aws"
     status=0
-    if ! aws ec2 delete-key-pair --key-name "$STAX_NAME" > /dev/null; then
+    if ! stax-aws ec2 delete-key-pair --key-name "$STAX_NAME" > /dev/null; then
         stax-error "failed to delete key $STAX_NAME, please remove it manually"
         return 1
     fi
@@ -1157,12 +1166,12 @@ stax-delete-bucket(){
         return 10
     fi
     stax-message "  making sure bucket $STAX_NAME exists in aws"
-    if ! aws --output json s3api list-buckets | $jq --raw-output '.Buckets[].Name' | grep -q "^$STAX_NAME$" > /dev/null 2>&1; then
+    if ! stax-aws --output json s3api list-buckets | $jq --raw-output '.Buckets[].Name' | grep -q "^$STAX_NAME$" > /dev/null 2>&1; then
         stax-error "bucket $STAX_NAME does not exist"
         return 1
     fi
     stax-message "  removing s3 bucket $STAX_NAME"
-    if ! aws s3 rb --force "s3://$STAX_NAME" > /dev/null; then
+    if ! stax-aws s3 rb --force "s3://$STAX_NAME" > /dev/null; then
         stax-error "failed to delete 3 bucket $STAX_NAME, please remove it manually"
     fi
 }
@@ -1219,7 +1228,7 @@ stax-delete(){
         touch "$STAX_DIR/audit/$STAX_NAME-logger/$date-deleted-logger"
     fi
     stax-message "deleting $STAX_NAME stax"
-    if ! aws cloudformation delete-stack --stack-name "$STAX_NAME" > /dev/null; then
+    if ! stax-aws cloudformation delete-stack --stack-name "$STAX_NAME" > /dev/null; then
         stax-error "stax delete of $STAX_NAME failed"
         stax-error "you will need to clean up the stack, key, bucket, and files"
         return 1
@@ -1446,7 +1455,7 @@ stax-rds(){
     tags="$tags]"
     stax-message "  using tags: $tags"
     stax-message "  creating rds instance $STAX_NAME_RDS"
-    if ! aws rds create-db-instance \
+    if ! stax-aws rds create-db-instance \
          --db-name "$name" \
          --db-instance-identifier "$STAX_NAME_RDS" \
          --allocated-storage "$size" \
@@ -1488,7 +1497,7 @@ stax-rds-delete(){
         stax-error "unknown rds: $rds"
         return 1
     fi
-    if ! aws rds delete-db-instance \
+    if ! stax-aws rds delete-db-instance \
          --db-instance-identi "$rds" \
          --no-skip-final-snapshot \
          --final-db-snapshot-identifier "$rds-final" > /dev/null
